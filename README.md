@@ -1,130 +1,75 @@
-# fleet-template-v1
+# Netty template
 
-## What This Template Is
+Provisioned from [`Qode-Fleet-Control/fleet-template-v1`](https://github.com/Qode-Fleet-Control/fleet-template-v1) — the fleet
+lifecycle contract (`bin/`, `fleet.conf`, deploy workflows) with a
+Netty HTTP server starter laid on top.
 
-`fleet-template-v1` is a **language-agnostic app lifecycle harness** for apps
-managed by the fleet platform. It gives any app — Node, Python, Go, a Docker
-Compose stack, anything — a uniform way to be deployed and controlled, without
-the fleet needing to know a single thing about your stack.
+A Netty 4.2 HTTP server on Java 21, Maven build: `ServerBootstrap` + `HttpServerCodec` + `HttpObjectAggregator` and one handler that answers `GET /` with a small JSON document and `GET /health` with `{"status":"ok"}` (404 otherwise).
 
-The fleet injects runtime variables into the environment (`PORT`, `BASE_PATH`,
-`DATABASE_URL`) and calls `./bin/run` to deploy. Everything project-specific —
-how to install, build, and start your app — lives in **one file: `fleet.conf`**.
-That is the only file you edit per project.
+## Origin
 
-## Repository Structure
+Hand-written — Netty ships no project generator. Shaped after Netty's own example
+`io.netty.example.http.helloworld` (HttpHelloWorldServer / Initializer / Handler, branch 4.2),
+using 4.2's `MultiThreadIoEventLoopGroup` + `NioIoHandler`.
 
-```
-fleet.conf        ← the only file you edit per project
-.env              ← local-only env vars (gitignored)
-bin/
-  _common.sh      ← shared logic; never edit this
-  run             ← install + build + start (called by the fleet)
-  start           ← start only (no rebuild)
-  restart         ← stop + full run
-  reload          ← hot-reload config without rebuild
-  stop            ← stop the running process
-```
+## Verified
 
-## The One File You Edit: `fleet.conf`
+**Not yet verified end to end on docker.** On 2026-10-05 the shared docker host's disk sat at
+0-1 GB free for over 90 minutes (other builds were running), under the 6 GB floor this
+scaffold's verification requires, so the `docker compose` build/run check was not run.
+Run it before trusting the image:
 
-`fleet.conf` is sourced as shell by the lifecycle scripts. Fill in the commands
-for your stack; leave any command empty (`''`) to skip that step.
+    .claude/skills/migrate-docker-runtime/scripts/verify.sh . <port>   # run -> health 200, restart, stop
 
-```sh
-NAME="my-app"           # label shown in fleet logs
-PORT="3000"             # default port (fleet overrides via $PORT env var)
-HEALTH_PATH="/"         # HTTP path that returns 200 when the app is ready
+What did pass, on 2026-10-05:
 
-INSTALL_CMD='npm ci'
-BUILD_CMD='npm run build'
-START_CMD='node dist/server.js'   # must listen on $PORT; run in foreground
-RELOAD_CMD=''           # optional; empty → falls back to stop+start
-```
+- `mvn -B package` **with the test suite** in `maven:3.9-eclipse-temurin-21` (the Dockerfile's
+  build image) — compiles, tests green, artifacts produced.
 
-> **Critical rule:** single-quote any command that uses `$PORT` or
-> `$BASE_PATH`. Single quotes defer variable expansion to **runtime** — when the
-> command actually runs, with the fleet-injected value — rather than at the
-> moment `fleet.conf` is sourced (when those values aren't set yet). Use
-> `START_CMD='gunicorn app:app --bind 0.0.0.0:$PORT'`, never double quotes.
+## Run it
 
-## How the Lifecycle Works
+**On the fleet** — nothing to do: the fleet clones the repo, injects `PORT` (plus
+`DATABASE_URL` and the workspace's other services) and calls `bin/run`, which runs
+fleet.conf's `DOCKER_BUILD_CMD` (`docker compose build`) then `DOCKER_START_CMD`
+(`docker compose up`, in the foreground). The health check hits `/health`.
 
-| Script | What it does | When to use |
-| --- | --- | --- |
-| `bin/run` | `INSTALL_CMD` → `BUILD_CMD` → `START_CMD` | Fleet deploy, fresh start |
-| `bin/start` | `START_CMD` only | Restart without rebuild |
-| `bin/restart` | stop + `bin/run` | After a code/dep change |
-| `bin/reload` | `RELOAD_CMD`, or stop+start if empty | After a config-only change |
-| `bin/stop` | Kill by pidfile or port | Tear down |
+**With docker**, locally:
 
-> The process PID is written to `.fleet/app.pid` so subsequent `stop`/`restart`
-> calls can find and terminate it reliably. If the pidfile is missing or stale,
-> `stop` falls back to freeing whatever is listening on `$PORT`.
+    PORT=8080 bin/run                  # the fleet's docker runtime
+    docker compose up --build            # or plain compose; serves on ${PORT:-8080}
+    curl http://localhost:8080/health
 
-## How to Apply This to Your Project
+**Without docker** — a JDK 21 and Maven 3.9 (`mvn`) on `PATH`:
 
-### Step 1 — Copy the template into your repo
+    FLEET_RUNTIME=process PORT=8080 bin/run
 
-```sh
-cp -r fleet-template-v1/* my-project/
-```
+| step | command |
+|---|---|
+| install | `mvn -B -q dependency:go-offline` |
+| build | `mvn -B -q package -DskipTests` |
+| start | `env PORT="$PORT" java -jar target/app.jar` |
 
-Or, if starting fresh, just clone it and work from `main`.
+    ./bin/run       # install, build, start in the foreground
+    ./bin/start     # start from existing build artifacts
+    ./bin/restart   # rebuild and restart
+    ./bin/stop      # stop whatever holds the port
 
-### Step 2 — Edit `fleet.conf` (the only required change)
+## Serving
 
-Fill in your stack's commands. Per-stack examples:
+Listens on `0.0.0.0:$PORT` (default `8080`), read from the environment at run
+time. The app is served at the root (`/`) of its own hostname
+(`https://<hash>.<FLEET_APP_DOMAIN>/`), so every route, redirect and asset URL is
+a plain root path. `/health` answers 200 for the fleet's health check.
 
-```sh
-# Node.js
-INSTALL_CMD='npm ci'
-BUILD_CMD='npm run build'
-START_CMD='node dist/index.js'
+## Layout
 
-# Python (Gunicorn)
-INSTALL_CMD='pip install -r requirements.txt'
-BUILD_CMD=''
-START_CMD='gunicorn app:app --bind 0.0.0.0:$PORT'
+- `src/main/java/world/qode/app/HttpServer.java` — bootstrap, binds `0.0.0.0:$PORT`.
+- `src/main/java/world/qode/app/HttpServerInitializer.java` — the pipeline.
+- `src/main/java/world/qode/app/HttpServerHandler.java` — routing and responses.
+- `src/test/java/...` — handler tests on an `EmbeddedChannel`.
+- `pom.xml` — shades Netty into one runnable `target/app.jar`.
 
-# Go
-INSTALL_CMD=''
-BUILD_CMD='go build -o ./out/server ./cmd/server'
-START_CMD='./out/server'
+## What differs from stock output
 
-# Docker Compose
-INSTALL_CMD=''
-BUILD_CMD='docker compose build'
-START_CMD='docker compose up'
-RELOAD_CMD='docker compose up -d --no-build'
-```
-
-### Step 3 — Set local env vars in `.env` (gitignored)
-
-```sh
-APP_NAME=My App
-DATABASE_URL=postgres://localhost/mydb
-```
-
-### Step 4 — Verify standalone
-
-```sh
-PORT=3001 bin/run      # should install, build, and serve on 3001
-curl http://localhost:3001/   # should 200
-```
-
-### Step 5 — Connect to the fleet
-
-Point the fleet at your repo. It will clone it, inject `PORT` / `BASE_PATH` /
-`DATABASE_URL`, and call `bin/run`. As long as your `START_CMD` listens on
-`$PORT` and `HEALTH_PATH` returns 200, the fleet will mark the app healthy.
-
-## Key Invariants
-
-- **`START_CMD` must run in the foreground and listen on `$PORT`.** Do not use a
-  dev server — HMR / hot-reload chunks 404 behind the ingress and will break the
-  app.
-- **Never put secrets in `fleet.conf`** — it's committed. Use `.env` locally;
-  the fleet injects secrets via the environment.
-- **`bin/_common.sh` is shared infrastructure** — don't edit it per project. All
-  project-specific configuration belongs in `fleet.conf`.
+- No generator exists; everything above is hand-written (see Origin).
+- Added the fleet harness: `bin/`, `fleet.conf`, `Dockerfile`, `compose.yaml`, `.dockerignore`, `.gitignore`, `.github/workflows/`, `docs/fleet-lifecycle.md`.
