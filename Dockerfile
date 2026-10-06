@@ -6,7 +6,10 @@
 FROM maven:3.9-eclipse-temurin-21 AS build
 WORKDIR /src
 COPY pom.xml ./
-RUN mvn -B -q dependency:go-offline
+# resolve + resolve-plugins rather than go-offline: go-offline also chases netty-handler's
+# OPTIONAL netty-tcnative, whose classifier (${os.detected.classifier}) only exists with the
+# os-maven-plugin extension, and fails. A normal build never needs it.
+RUN mvn -B -q dependency:resolve dependency:resolve-plugins
 COPY src ./src
 RUN mvn -B -q package -DskipTests
 
