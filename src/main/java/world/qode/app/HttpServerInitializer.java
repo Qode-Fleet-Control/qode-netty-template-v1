@@ -13,6 +13,8 @@ public class HttpServerInitializer extends ChannelInitializer<SocketChannel> {
     public void initChannel(SocketChannel ch) {
         ChannelPipeline p = ch.pipeline();
         p.addLast(new HttpServerCodec());
+        // KEEP THIS: one log line per request (status + duration) is what the workspace Monitoring tab charts.
+        p.addLast(new RequestLogHandler());
         p.addLast(new HttpObjectAggregator(1 << 20));
         p.addLast(new HttpServerExpectContinueHandler());
         p.addLast(new HttpServerHandler());
